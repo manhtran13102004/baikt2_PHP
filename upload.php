@@ -3,7 +3,7 @@ session_start();
 
 // Tự động xóa ảnh lỗi sau 5 phút
 $uploadDir = 'uploads/';
-$expirationTime = 5*60; // 5 phút
+$expirationTime = 5*60; //5 phút
 
 foreach (glob($uploadDir . "invalid_*.*") as $file) {
     if (filemtime($file) + $expirationTime < time()) {
@@ -13,10 +13,51 @@ foreach (glob($uploadDir . "invalid_*.*") as $file) {
 
 $validImages = $invalidImages = [];
 
+// Hàm nén ảnh (có resize nếu ảnh quá lớn)
+function compressImage($source, $destination, $quality = 75, $maxDim = 1920) {
+    $info = getimagesize($source);
+    if (!$info) return false;
+
+    $mime = $info['mime'];
+    switch ($mime) {
+        case 'image/jpeg': $image = imagecreatefromjpeg($source); break;
+        case 'image/png':  $image = imagecreatefrompng($source); break;
+        case 'image/gif':  $image = imagecreatefromgif($source); break;
+        default: return false;
+    }
+
+    $width = imagesx($image);
+    $height = imagesy($image);
+    if ($width > $maxDim || $height > $maxDim) {
+        $scale = min($maxDim / $width, $maxDim / $height);
+        $newWidth = floor($width * $scale);
+        $newHeight = floor($height * $scale);
+        $resized = imagecreatetruecolor($newWidth, $newHeight);
+        imagecopyresampled($resized, $image, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
+        imagedestroy($image);
+        $image = $resized;
+    }
+
+    if ($mime !== 'image/jpeg') {
+        $bg = imagecreatetruecolor(imagesx($image), imagesy($image));
+        imagefill($bg, 0, 0, imagecolorallocate($bg, 255, 255, 255));
+        imagecopy($bg, $image, 0, 0, 0, 0, imagesx($image), imagesy($image));
+        imagedestroy($image);
+        $image = $bg;
+    }
+
+    $destination = preg_replace('/\.(png|gif)$/i', '.jpg', $destination);
+    imagejpeg($image, $destination, $quality);
+    imagedestroy($image);
+    return $destination;
+}
+
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $dir = "uploads/";
     $allowed = ['jpg', 'gif', 'png'];
-    $maxSize = 2 * 1024 * 1024;
+    $maxSize = 2 * 1024 * 1024; // 2MB
+
+    $shouldCompress = isset($_POST['compress']);
 
     if (!is_dir($dir)) mkdir($dir, 0777, true);
 
@@ -27,9 +68,32 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $newName = uniqid() . ".$ext";
         $path = $dir . $newName;
 
-        if (in_array($ext, $allowed) && $size <= $maxSize) {
-            if (move_uploaded_file($tmp, $path)) {
-                $validImages[] = $path;
+        if (in_array($ext, $allowed)) {
+            if ($shouldCompress) {
+                $compressedPath = compressImage($tmp, $path);
+                if ($compressedPath && file_exists($compressedPath) && filesize($compressedPath) <= $maxSize) {
+                    $validImages[] = $compressedPath;
+                } else {
+                    $errorPath = $dir . 'invalid_' . uniqid() . ".$ext";
+                    move_uploaded_file($tmp, $errorPath);
+                    $invalidImages[] = [
+                        'path' => $errorPath,
+                        'name' => $name,
+                        'reason' => 'Dung lượng quá lớn sau khi nén'
+                    ];
+                }
+            } else {
+                if ($size <= $maxSize && move_uploaded_file($tmp, $path)) {
+                    $validImages[] = $path;
+                } else {
+                    $errorPath = $dir . 'invalid_' . uniqid() . ".$ext";
+                    move_uploaded_file($tmp, $errorPath);
+                    $invalidImages[] = [
+                        'path' => $errorPath,
+                        'name' => $name,
+                        'reason' => 'Dung lượng quá lớn hoặc lỗi khi lưu'
+                    ];
+                }
             }
         } else {
             $errorPath = $dir . 'invalid_' . uniqid() . ".$ext";
@@ -37,7 +101,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             $invalidImages[] = [
                 'path' => $errorPath,
                 'name' => $name,
-                'reason' => !in_array($ext, $allowed) ? 'Sai định dạng' : 'Dung lượng quá lớn'
+                'reason' => 'Sai định dạng ảnh'
             ];
         }
     }
@@ -59,7 +123,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <body class="container mt-5">
     <h2>Upload Ảnh</h2>
     <form action="upload.php" method="post" enctype="multipart/form-data">
-        <input type="file" name="images[]" multiple class="form-control mb-3" accept=".jpg,.gif,.png">
+        <input type="file" name="images[]" multiple class="form-control mb-2" accept=".jpg,.gif,.png">
+        <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" name="compress" id="compress" checked>
+            <label class="form-check-label" for="compress">Nén ảnh trước khi lưu</label>
+        </div>
         <button type="submit" class="btn btn-primary">Upload</button>
     </form>
 
@@ -77,7 +145,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                     <div class="card border-danger">
                         <img src="<?= $err['path'] ?>" class="card-img-top" alt="Lỗi">
                         <div class="card-body text-center">
-                            <p class="text-danger fw-bold">❌ <?= htmlspecialchars($err['name']) ?></p>
+                            <p class="text-danger fw-bold"> <?= htmlspecialchars($err['name']) ?></p>
                             <p class="text-warning"><?= $err['reason'] ?></p>
                         </div>
                     </div>
